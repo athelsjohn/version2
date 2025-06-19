@@ -1,4 +1,5 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator, ConfigDict, Field
 import pandas as pd
 import pickle
@@ -34,21 +35,6 @@ CF_MODEL_TEMPLATE = PATHS.get("cf_model_template")
 app = FastAPI()
 
 def load_models_and_data():
-    
-    """Loads machine learning models and data from disk.
-
-    This function loads:
-    - KMeans clustering model
-    - PowerTransformer model
-    - PCA model
-    - Collaborative filtering models (one per cluster)
-    - Customer data
-    - Merged order data
-
-    Raises:
-        RuntimeError: If any model or data file cannot be loaded.
-    """
-    
     global model_kmeans, pt, pca, cf_models, customer_df, df
     try:
         logger.info("Loading machine learning models...")
@@ -76,27 +62,6 @@ def load_models_and_data():
 load_models_and_data()
 
 class OrderLine(BaseModel):
-
-    """Pydantic model for order data.
-
-    Defines the structure and validation for order data.
-    Uses field aliases to match CSV column names.
-    Validates ID formats using regular expressions.
-
-    Attributes:
-        Order_ID: The unique order ID.
-        Customer_ID: The customer ID.
-        Warehouse_ID: The warehouse ID.
-        Customer_Age: The customer's age.
-        Customer_Gender: The customer's gender.
-        Date: The order date.
-        Product_ID: The product ID.
-        SKU_ID: The SKU ID.
-        Category: The product category.
-        Quantity: The quantity ordered.
-        Price_per_Unit: The price per unit.
-    """
-
     model_config = ConfigDict(
         populate_by_name=True
     )
@@ -142,29 +107,10 @@ class OrderLine(BaseModel):
 
 @app.post("/orders")
 def add_order(order: OrderLine):
-    """Adds a new order to the merged data CSV.
-
-    Validates the order, checks for duplicates, calculates derived fields (sales, recency, order gap),
-    and appends the order to the merged data file.
-
-    Args:
-        order (OrderLine): The order data to add.
-
-    Returns:
-        dict: A message indicating success or failure.
-
-    Raises:
-        HTTPException: If a duplicate order is detected or if an error occurs.
-    """
-
     try:
         logger.info(f"Received new order request: {order.model_dump()}")
-        # Use by_alias to ensure columns match CSV ("Order ID", etc.)
         new_row = pd.DataFrame([order.model_dump(by_alias=True)])
-
         new_row['Date'] = pd.to_datetime(new_row['Date']).dt.date
-
-        # Load existing data or create empty DataFrame
         if os.path.exists(MERGED_DATA_PATH):
             merged_df = pd.read_csv(MERGED_DATA_PATH)
             if 'Date' in merged_df.columns:
@@ -172,21 +118,16 @@ def add_order(order: OrderLine):
         else:
             merged_df = pd.DataFrame(columns=new_row.columns)
             logger.info("Created new merged dataframe")
-
-        # Check for duplicates
         key_cols = ['Order ID', 'Product ID', 'SKU ID']
         is_duplicate = merged_df.merge(new_row[key_cols], on=key_cols).shape[0] > 0
         if is_duplicate:
             logger.warning(f"Duplicate order detected: {order.model_dump()}")
-            raise HTTPException(status_code=400, detail="Duplicate order line detected.")
-
-        # Calculate derived fields
+            return JSONResponse(content={"message": "Duplicate order line detected."}, status_code=400)
         new_order_date = new_row['Date'].iloc[0]
         customer_id = new_row['Customer ID'].iloc[0]
         new_row['Sales'] = new_row['Quantity'] * new_row['Price per Unit']
         today = datetime.now().date()
         new_row['Recency'] = (today - new_order_date).days
-
         customer_orders = merged_df[merged_df['Customer ID'] == customer_id]
         if not customer_orders.empty:
             last_order_date = customer_orders['Date'].max()
@@ -195,44 +136,23 @@ def add_order(order: OrderLine):
         else:
             new_row['Order Gap'] = 0
             logger.info(f"First order for customer {customer_id}")
-
-        # Append and save
         merged_df = pd.concat([merged_df, new_row], ignore_index=True)
         merged_df['Date'] = pd.to_datetime(merged_df['Date']).dt.date
         merged_df.to_csv(MERGED_DATA_PATH, index=False)
-
         logger.info(f"Successfully added order ID {order.Order_ID}")
-        return {"message": "Order added successfully."}
-
-    except HTTPException as he:
-        raise
+        return JSONResponse(content={"message": "Order added successfully."})
     except Exception as e:
         logger.exception(f"Failed to add order: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return JSONResponse(content={"message": f"Error: {str(e)}"}, status_code=500)
 
 @app.post("/users")
 def predict_next_product(customer_id: str):
-
-    """Generates product recommendations for a customer.
-
-    Uses customer features to determine the customer's cluster, then uses the collaborative filtering
-    model for that cluster to recommend products.
-
-    Args:
-        customer_id (str): The customer ID to generate recommendations for.
-
-    Returns:
-        dict: A list of recommended product IDs.
-
-    Raises:
-        HTTPException: If the customer is not found or if an error occurs.
-    """
     try:
         logger.info(f"Starting recommendation process for {customer_id}")
         cust_row = customer_df[customer_df['Customer ID'] == customer_id]
         if cust_row.empty:
             logger.warning(f"Customer not found: {customer_id}")
-            raise ValueError("Customer not found")
+            return JSONResponse(content={"message": "Customer not found"}, status_code=404)
         features = cust_row[['total_spend', 'purchase_frequency', 'avg_basket_size',
                             'cat_diversity', 'recency', 'gap', 'age']].values
         features_pca = pca.transform(pt.transform(features))
@@ -246,28 +166,13 @@ def predict_next_product(customer_id: str):
             predictions.append((pid, pred.est))
         top_products = sorted(predictions, key=lambda x: x[1], reverse=True)[:5]
         logger.info(f"Generated recommendations for {customer_id}: {[pid for pid, _ in top_products]}")
-        return {"recommended_products": [pid for pid, _ in top_products]}
+        return JSONResponse(content={"recommended_products": [pid for pid, _ in top_products]})
     except Exception as e:
         logger.exception(f"Recommendation failed for {customer_id}: {str(e)}")
-        raise HTTPException(status_code=404, detail=str(e))
+        return JSONResponse(content={"message": f"Error: {str(e)}"}, status_code=500)
 
 @app.get("/orders")
 def order_exists(order_id: int, product_id: str, sku_id: str):
-
-    """Checks if an order line exists in the merged data CSV.
-
-    Args:
-        order_id (int): The order ID.
-        product_id (str): The product ID.
-        sku_id (str): The SKU ID.
-
-    Returns:
-        dict: A dictionary with the key 'exists' indicating whether the order line exists.
-
-    Raises:
-        HTTPException: If an error occurs while checking for the order.
-    """
-
     try:
         logger.info(f"Checking existence: Order {order_id}, Product {product_id}, SKU {sku_id}")
         if not os.path.exists(MERGED_DATA_PATH):
@@ -280,4 +185,4 @@ def order_exists(order_id: int, product_id: str, sku_id: str):
         return {"exists": bool(exists)}
     except Exception as e:
         logger.exception(f"Existence check failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return JSONResponse(content={"message": f"Error: {str(e)}"}, status_code=500)
