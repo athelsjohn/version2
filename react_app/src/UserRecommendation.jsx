@@ -10,27 +10,22 @@ function UserRecommendation() {
     setRecommendations(null);
     setError(null);
     try {
-      const response = await fetch(`/users?customer_id=${customerId}`, {
+      const response = await fetch("http://127.0.0.1:8000/users", {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ customer_id: customerId }),
       });
-      const text = await response.text();
-      if (!text) {
-        setError("No data returned from server.");
+
+      // Handle HTTP errors explicitly
+      if (!response.ok) {
+        const errorText = await response.text();
+        setError(`HTTP ${response.status}: ${errorText}`);
         return;
       }
-      let data;
-      try {
-        data = JSON.parse(text);
-      } catch (err) {
-        setError("Invalid JSON from server.");
-        return;
-      }
+
+      const data = await response.json();
       if (data.message) {
         setError(data.message);
-        return;
-      }
-      if (data.detail) {
-        setError(data.detail);
         return;
       }
       setRecommendations(

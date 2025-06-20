@@ -1,4 +1,3 @@
-// OrderLookup.jsx
 import React, { useState } from "react";
 
 function OrderLookup() {
@@ -18,7 +17,12 @@ function OrderLookup() {
     setExists(null);
     const params = new URLSearchParams(query).toString();
     try {
-      const response = await fetch(`/orders?${params}`);
+      const response = await fetch(`http://127.0.0.1:8000/orders?${params}`);
+      if (!response.ok) {
+        const errorText = await response.text();
+        setExists(`HTTP ${response.status}: ${errorText}`);
+        return;
+      }
       const data = await response.json();
       setExists(data.exists ? "Order exists." : "Order does not exist.");
     } catch (err) {

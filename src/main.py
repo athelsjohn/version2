@@ -9,6 +9,7 @@ import iniconfig
 from datetime import datetime
 import logging
 from logging.handlers import RotatingFileHandler
+from fastapi.middleware.cors import CORSMiddleware
 
 # Logging configuration
 logging.basicConfig(
@@ -33,6 +34,26 @@ PCA_MODEL_PATH = PATHS.get("pca_model")
 CF_MODEL_TEMPLATE = PATHS.get("cf_model_template")
 
 app = FastAPI()
+origins = [
+    "http://localhost",
+    "http://localhost:5173/",
+    "http://127.0.0.1:5173/",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "localhost:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000"
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins = origins,
+    allow_credentials = True,
+    allow_methods = ["*"],
+    allow_headers = ["*"]
+)
 
 def load_models_and_data():
     global model_kmeans, pt, pca, cf_models, customer_df, df
@@ -60,6 +81,9 @@ def load_models_and_data():
         raise RuntimeError(f"Initialization error: {str(e)}")
 
 load_models_and_data()
+
+class CustomerRequest(BaseModel):
+    customer_id: str
 
 class OrderLine(BaseModel):
     model_config = ConfigDict(
@@ -106,7 +130,7 @@ class OrderLine(BaseModel):
         return v
 
 @app.post("/orders")
-def add_order(order: OrderLine):
+async def add_order(order: OrderLine):
     try:
         logger.info(f"Received new order request: {order.model_dump()}")
         new_row = pd.DataFrame([order.model_dump(by_alias=True)])
@@ -146,33 +170,33 @@ def add_order(order: OrderLine):
         return JSONResponse(content={"message": f"Error: {str(e)}"}, status_code=500)
 
 @app.post("/users")
-def predict_next_product(customer_id: str):
+async def predict_next_product(request: CustomerRequest):
     try:
-        logger.info(f"Starting recommendation process for {customer_id}")
-        cust_row = customer_df[customer_df['Customer ID'] == customer_id]
+        logger.info(f"Starting recommendation process for {request.customer_id}")
+        cust_row = customer_df[customer_df['Customer ID'] == request.customer_id]
         if cust_row.empty:
-            logger.warning(f"Customer not found: {customer_id}")
+            logger.warning(f"Customer not found: {request.customer_id}")
             return JSONResponse(content={"message": "Customer not found"}, status_code=404)
         features = cust_row[['total_spend', 'purchase_frequency', 'avg_basket_size',
                             'cat_diversity', 'recency', 'gap', 'age']].values
         features_pca = pca.transform(pt.transform(features))
         cluster = int(model_kmeans.predict(features_pca)[0])
-        logger.debug(f"Customer {customer_id} assigned to cluster {cluster}")
+        logger.debug(f"Customer {request.customer_id} assigned to cluster {cluster}")
         all_products = set(df['Product ID'].unique())
         cf_model = cf_models[cluster]
         predictions = []
         for pid in all_products:
-            pred = cf_model.predict(customer_id, pid)
+            pred = cf_model.predict(request.customer_id, pid)
             predictions.append((pid, pred.est))
         top_products = sorted(predictions, key=lambda x: x[1], reverse=True)[:5]
-        logger.info(f"Generated recommendations for {customer_id}: {[pid for pid, _ in top_products]}")
+        logger.info(f"Generated recommendations for {request.customer_id}: {[pid for pid, _ in top_products]}")
         return JSONResponse(content={"recommended_products": [pid for pid, _ in top_products]})
     except Exception as e:
-        logger.exception(f"Recommendation failed for {customer_id}: {str(e)}")
+        logger.exception(f"Recommendation failed for {request.customer_id}: {str(e)}")
         return JSONResponse(content={"message": f"Error: {str(e)}"}, status_code=500)
 
 @app.get("/orders")
-def order_exists(order_id: int, product_id: str, sku_id: str):
+async def order_exists(order_id: int, product_id: str, sku_id: str):
     try:
         logger.info(f"Checking existence: Order {order_id}, Product {product_id}, SKU {sku_id}")
         if not os.path.exists(MERGED_DATA_PATH):
@@ -186,3 +210,8 @@ def order_exists(order_id: int, product_id: str, sku_id: str):
     except Exception as e:
         logger.exception(f"Existence check failed: {str(e)}")
         return JSONResponse(content={"message": f"Error: {str(e)}"}, status_code=500)
+
+# Optional: Add a ping endpoint for debugging
+@app.get("/ping")
+async def ping():
+    return {"message": "pong"}
